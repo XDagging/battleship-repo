@@ -1,1 +1,6 @@
 *.class
+*.log
+*.txt
+/.claude
+
+/target

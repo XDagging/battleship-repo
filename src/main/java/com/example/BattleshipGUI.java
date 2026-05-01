@@ -1,6 +1,12 @@
+package com.example;
+
+import java.awt.*;
+import java.io.*;
+import java.net.*;
 import javax.swing.*;
 import javax.swing.border.*;
-import java.awt.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
 
 public class BattleshipGUI extends JFrame {
 
@@ -27,11 +33,21 @@ public class BattleshipGUI extends JFrame {
 
     private CardLayout cardLayout;
     private JPanel     cardPanel;
+    private Battleship game;
+    private JPanel     boardsContainer;
+
+    private ObjectOutputStream oos;
+    private ObjectInputStream ois;
+    private Socket socket;
+    private boolean isPlayerOne = true; // Default to P1, server will update
 
     public BattleshipGUI() {
         setTitle("Battleship");
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setResizable(false);
+
+        game = new Battleship(10);
+        connectToServer();
 
         cardLayout = new CardLayout();
         cardPanel  = new JPanel(cardLayout);
@@ -42,6 +58,56 @@ public class BattleshipGUI extends JFrame {
         add(cardPanel);
         pack();
         setLocationRelativeTo(null);
+    }
+
+    private void connectToServer() {
+        try {
+            System.out.println("Attempting to connect to server...");
+            socket = new Socket("127.0.0.1", 9876);
+            oos = new ObjectOutputStream(socket.getOutputStream());
+            oos.flush();
+            ois = new ObjectInputStream(socket.getInputStream());
+
+            // Start reader thread
+            Thread readerThread = new Thread(() -> {
+                try {
+                    while (!socket.isClosed()) {
+                        Object obj = ois.readObject();
+                        if (obj instanceof String) {
+                            String jsonState = (String) obj;
+                            updateStateFromJson(jsonState);
+                        }
+                    }
+                } catch (Exception e) {
+                    System.out.println("Disconnected from server: " + e.getMessage());
+                }
+            });
+            readerThread.setDaemon(true);
+            readerThread.start();
+
+        } catch (Exception e) {
+            JOptionPane.showMessageDialog(this, "Could not connect to server: " + e.getMessage());
+        }
+    }
+
+    private void updateStateFromJson(String json) {
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            com.fasterxml.jackson.databind.JsonNode root = mapper.readTree(json);
+            
+            // Update maps
+            game.mapOne = mapper.convertValue(root.get("mapOne"), int[][].class);
+            game.mapTwo = mapper.convertValue(root.get("mapTwo"), int[][].class);
+            
+            // Update player identity
+            if (root.has("isPlayerOne")) {
+                this.isPlayerOne = root.get("isPlayerOne").asBoolean();
+            }
+            
+            SwingUtilities.invokeLater(() -> refreshBoards());
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
     private JPanel buildSplash() {
@@ -95,40 +161,34 @@ public class BattleshipGUI extends JFrame {
         title.setBorder(new EmptyBorder(0, 0, 18, 0));
         root.add(title, BorderLayout.NORTH);
 
-        JPanel boardsPanel = new JPanel(new GridLayout(1, 2, 40, 0));
-        boardsPanel.setBackground(COLOR_BG);
+        boardsContainer = new JPanel(new GridLayout(1, 2, 40, 0));
+        boardsContainer.setBackground(COLOR_BG);
 
-        // --- Sample data just to show what cells look like ---
-        int[][] yourBoard = new int[10][10];
-        placeShipH(yourBoard, 0, 0, 5, SHIP);
-        placeShipH(yourBoard, 2, 1, 4, SHIP);
-        placeShipV(yourBoard, 5, 4, 3, SHIP);
-        placeShipH(yourBoard, 7, 6, 3, SHIP);
-        placeShipV(yourBoard, 1, 7, 2, SHIP);
-        yourBoard[0][2] = HIT;
-        yourBoard[0][3] = HIT;
-        yourBoard[3][1] = MISS;
-        yourBoard[6][5] = MISS;
-        yourBoard[8][8] = MISS;
+        refreshBoards();
 
-        int[][] enemyBoard = new int[10][10];
-        enemyBoard[1][1] = HIT;
-        enemyBoard[1][2] = HIT;
-        enemyBoard[4][6] = MISS;
-        enemyBoard[7][3] = MISS;
-        enemyBoard[9][9] = MISS;
-        enemyBoard[2][8] = HIT;
-
-        boardsPanel.add(buildBoard("YOUR FLEET", yourBoard, true));
-        boardsPanel.add(buildBoard("ENEMY WATERS", enemyBoard, false));
-
-        root.add(boardsPanel, BorderLayout.CENTER);
+        root.add(boardsContainer, BorderLayout.CENTER);
         root.add(buildLegend(), BorderLayout.SOUTH);
 
         return root;
     }
 
-    private JPanel buildBoard(String label, int[][] grid, boolean showShips) {
+    private void refreshBoards() {
+        boardsContainer.removeAll();
+        
+        if (isPlayerOne) {
+            boardsContainer.add(buildBoard("YOUR FLEET", game.mapOne, true, false));
+            boardsContainer.add(buildBoard("ENEMY WATERS", game.mapTwo, false, true));
+        } else {
+            // For Player 2, mapTwo is THEIR fleet, and mapOne is the ENEMY waters
+            boardsContainer.add(buildBoard("YOUR FLEET", game.mapTwo, true, false));
+            boardsContainer.add(buildBoard("ENEMY WATERS", game.mapOne, false, true));
+        }
+
+        boardsContainer.revalidate();
+        boardsContainer.repaint();
+    }
+
+    private JPanel buildBoard(String label, int[][] grid, boolean showShips, boolean interactive) {
         JPanel wrapper = new JPanel(new BorderLayout(0, 8));
         wrapper.setBackground(COLOR_BG);
 
@@ -139,24 +199,22 @@ public class BattleshipGUI extends JFrame {
         wrapper.add(boardTitle, BorderLayout.NORTH);
 
         // Grid + row/col headers in a panel
-        // Layout: 11x11 (1 header row + 10 data rows, 1 header col + 10 data cols)
         JPanel gridPanel = new JPanel(new GridLayout(11, 11, 2, 2));
         gridPanel.setBackground(COLOR_BG);
 
         for (int row = 0; row < 11; row++) {
             for (int col = 0; col < 11; col++) {
                 if (row == 0 && col == 0) {
-                    // Top-left corner — blank
                     gridPanel.add(headerCell(""));
                 } else if (row == 0) {
-                    // Column headers A–J
                     gridPanel.add(headerCell(COL_LABELS[col - 1]));
                 } else if (col == 0) {
-                    // Row headers 1–10
                     gridPanel.add(headerCell(String.valueOf(row)));
                 } else {
-                    int state = grid[row - 1][col - 1];
-                    gridPanel.add(makeCell(state, showShips));
+                    int r = row - 1;
+                    int c = col - 1;
+                    int state = grid[r][c];
+                    gridPanel.add(makeCell(state, showShips, interactive, r, c));
                 }
             }
         }
@@ -175,7 +233,7 @@ public class BattleshipGUI extends JFrame {
         return lbl;
     }
 
-    private JPanel makeCell(int state, boolean showShips) {
+    private JPanel makeCell(int state, boolean showShips, boolean interactive, int r, int c) {
         JPanel cell = new JPanel(new BorderLayout());
         cell.setPreferredSize(new Dimension(36, 36));
         cell.setBorder(BorderFactory.createLineBorder(new Color(10, 30, 60), 1));
@@ -209,6 +267,20 @@ public class BattleshipGUI extends JFrame {
             sym.setFont(new Font("Dialog", Font.BOLD, 16));
             sym.setForeground(fgColor);
             cell.add(sym, BorderLayout.CENTER);
+        }
+
+        if (interactive && state != HIT && state != MISS) {
+            cell.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+            cell.addMouseListener(new java.awt.event.MouseAdapter() {
+                public void mouseClicked(java.awt.event.MouseEvent e) {
+                    try {
+                        oos.writeObject("SHOOT " + r + " " + c);
+                        oos.flush();
+                    } catch (Exception ex) {
+                        ex.printStackTrace();
+                    }
+                }
+            });
         }
 
         return cell;
@@ -246,14 +318,6 @@ public class BattleshipGUI extends JFrame {
     }
 
     // Helpers to place sample ships on the preview grid
-    private void placeShipH(int[][] board, int row, int col, int len, int val) {
-        for (int i = 0; i < len && col + i < 10; i++) board[row][col + i] = val;
-    }
-
-    private void placeShipV(int[][] board, int row, int col, int len, int val) {
-        for (int i = 0; i < len && row + i < 10; i++) board[row + i][col] = val;
-    }
-
     public static void main(String[] args) {
         SwingUtilities.invokeLater(() -> new BattleshipGUI().setVisible(true));
     }
